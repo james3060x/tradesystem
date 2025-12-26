@@ -1,4 +1,9 @@
-import { STORAGE_KEY, SCHEMA_VERSION, defaultDB, validateDBShape } from "./schema.js";
+/*
+请更新！
+新增功能：迁移到 1.0.4（只做 schema version 对齐与 config/lang 兜底）
+调整行数：约 +10 行
+*/
+import { STORAGE_KEY, SCHEMA_VERSION, defaultDB, validateDBShape, defaultConfig } from "./schema.js";
 import { nowISO, toast } from "./utils.js";
 
 export const store = {
@@ -72,10 +77,11 @@ export const store = {
 };
 
 function migrate(db) {
-  // v1.0.0：目前只做版本对齐位（未来可扩展）
   db.meta = db.meta || {};
-  db.meta.version = db.meta.version || SCHEMA_VERSION;
+  db.meta.config = db.meta.config || defaultConfig();
+  db.meta.lang = db.meta.lang || "zh";
+  db.meta.version = SCHEMA_VERSION;
   if (!db.meta.createdAt) db.meta.createdAt = nowISO();
-  if (!db.meta.updatedAt) db.meta.updatedAt = nowISO();
+  db.meta.updatedAt = nowISO();
   return db;
 }

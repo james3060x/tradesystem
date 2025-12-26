@@ -5,7 +5,7 @@ export function parseRoute(hash) {
   const query = Object.fromEntries(new URLSearchParams(queryPart || ""));
   const seg = path.split("/").filter(Boolean);
 
-  // routes:
+  // routes
   // /dashboard
   // /assets
   // /asset/:id

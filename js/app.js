@@ -1,15 +1,19 @@
+/*
+请更新！
+新增功能：评估保存逻辑恢复为“6 维输入 → 分档输出 → Recommendation”
+调整行数：约 +140 行
+*/
 import { parseRoute, setActiveNav } from "./router.js";
 import { store } from "./store.js";
 import { ui } from "./ui.js";
-import { seedDemoDB } from "./schema.js";
-import { qs, toast, nowISO, uid } from "./utils.js";
+import { seedDemoDB, Enums } from "./schema.js";
+import { qs, toast, nowISO, uid, parseMaybeDT } from "./utils.js";
 
 let db = null;
 
 function ensureInit() {
   db = store.load();
-  // 首次启动：给一个 demo seed（你也可以改成空库）
-  if (!db.assets.length && !db.triggers.length) {
+  if (!db.assets.length) {
     db = seedDemoDB();
     store.save(db);
   }
@@ -33,39 +37,59 @@ function render() {
 }
 
 function bindPageEvents(r) {
-  // Top quick add
   const quick = qs("#btnQuickAdd");
-  if (quick) quick.onclick = () => {
-    location.hash = "#/assets";
-    toast("去标的页新增（右上角＋用于未来扩展）");
-  };
+  if (quick) quick.onclick = () => { location.hash = "#/assets?add=1"; };
 
   if (r.name === "assets") {
-    // 长按/按钮新增目前用简单 prompt（无框架最小可用）
-    // 这里用点击标题区域快速新增（你也可以换成专门按钮）
-    const title = qs(".topbar__title");
-    if (title) {
-      title.onclick = () => {
-        const ticker = prompt("新增标的：输入代码/名称（如 TSLA）");
-        if (!ticker) return;
-        db = store.update(d => {
-          const t = nowISO();
-          d.assets.push({
-            id: uid("asset"),
-            name: ticker.toUpperCase(),
-            ticker: ticker.toUpperCase(),
-            assetClass: "Stock",
-            venue: "US",
-            status: "Watching",
-            notes: "",
-            createdAt: t,
-            updatedAt: t
-          });
-        });
-        render();
-        toast("已新增标的");
-      };
-    }
+    const btn = qs("#btnCreateAsset");
+    if (btn) btn.onclick = () => {
+      const symbol = (qs("#new_symbol")?.value || "").trim().toUpperCase();
+      if (!symbol) return toast("请输入代码（Symbol）");
+
+      const status = (qs("#new_status")?.value || "观察").trim();
+      const industry = (qs("#new_industry")?.value || "").trim();
+      const thesis = (qs("#new_thesis")?.value || "").trim();
+
+      const planQtyRaw = (qs("#new_planQty")?.value || "").trim();
+      const holdingQtyRaw = (qs("#new_holdingQty")?.value || "0").trim();
+
+      const planQty = planQtyRaw ? Number(planQtyRaw) : null;
+      if (planQtyRaw && Number.isNaN(planQty)) return toast("计划数量必须是数字或留空");
+
+      const holdingQty = holdingQtyRaw ? Number(holdingQtyRaw) : 0;
+      if (holdingQtyRaw && Number.isNaN(holdingQty)) return toast("当前数量必须是数字");
+
+      const cfg = db.meta?.config || {};
+      const reasons = readCheckboxList("new_reason", cfg.buildReasons || []);
+
+      db = store.update(d => {
+        const t = nowISO();
+        const a = {
+          id: uid("asset"),
+          symbol,
+          status,
+          industry,
+          buildReasons: reasons,
+          thesis,
+          planQty,
+          holdingQty,
+          openedAt: null,
+          closedAt: null,
+          createdAt: t,
+          updatedAt: t
+        };
+
+        const holdingName = (d.meta?.config?.assetStatuses?.[2]) || "持仓";
+        const clearedName = (d.meta?.config?.assetStatuses?.[3]) || "清仓";
+        if (a.status === holdingName) a.openedAt = t;
+        if (a.status === clearedName) a.closedAt = t;
+
+        d.assets.push(a);
+      });
+
+      toast("已新增标的");
+      location.hash = "#/assets";
+    };
   }
 
   if (r.name === "assessNew") {
@@ -73,37 +97,72 @@ function bindPageEvents(r) {
     if (btn) btn.onclick = () => {
       const assetId = qs("#as_assetId")?.value || "";
       if (!assetId) return toast("请选择标的");
-      const type = qs("#as_type")?.value || "PositionReeval";
-      const reBuy = (qs("#as_reBuy")?.value || "true") === "true";
-      const reBuyTier = qs("#as_reBuyTier")?.value || "NA";
-      const riskDensity = qs("#as_riskDensity")?.value || "Med";
-      const capitalConstraint = qs("#as_capital")?.value || "Limited";
-      const keyLevelState = qs("#as_keyLevel")?.value || "Neutral";
-      const emotionRisk = qs("#as_emotion")?.value || "Low";
-      const boundary = qs("#as_boundary")?.value || "";
-      const explanation = qs("#as_explain")?.value || "";
+
+      const type = qs("#as_type")?.value || "持仓再评估";
+
+      const reBuy = qs("#as_reBuy")?.value || "是";
+      const reBuyTier = qs("#as_reBuyTier")?.value || "不适用";
+      const noRebuyReason = (qs("#as_noRebuyReason")?.value || "").trim();
+
+      const riskDensity = qs("#as_riskDensity")?.value || "中";
+      const keyLevelState = qs("#as_keyLevel")?.value || "中性";
+      const contrarian = qs("#as_contrarian")?.value || "否";
+
+      const capitalConstraint = qs("#as_capital")?.value || "有限";
+      const cashCushionOk = qs("#as_cashCushion")?.value || "是";
+
+      const strategyFit = qs("#as_strategyFit")?.value || "趋势跟随";
+      const conflict = qs("#as_conflict")?.value || "不冲突";
+
+      const emotionRisk = qs("#as_emotionRisk")?.value || "中";
+      const nextDecisionDamage = qs("#as_nextDecisionDamage")?.value || "中";
+
+      const boundary = (qs("#as_boundary")?.value || "").trim();
+      const explanation = (qs("#as_explain")?.value || "").trim();
+
+      const rec = computeRecommendation({
+        reBuy,
+        reBuyTier,
+        riskDensity,
+        keyLevelState,
+        capitalConstraint,
+        cashCushionOk,
+        conflict,
+        emotionRisk,
+        nextDecisionDamage,
+        contrarian
+      });
 
       db = store.update(d => {
         const t = nowISO();
-        const id = uid("as");
-        const rec = computeRecommendation({ reBuy, reBuyTier, riskDensity, capitalConstraint, keyLevelState, emotionRisk });
         d.assessments.push({
-          id,
+          id: uid("as"),
           assetId,
           triggerLogId: null,
           type,
+
+          // 6 维输入
           reBuy,
-          reBuySizeTier: reBuyTier,
+          reBuyTier,
+          noRebuyReason,
           riskDensity,
-          capitalConstraint,
           keyLevelState,
+          contrarian,
+          capitalConstraint,
+          cashCushionOk,
+          strategyFit,
+          conflict,
           emotionRisk,
+          nextDecisionDamage,
+
+          // 输出
           outcomeTier: rec.outcomeTier,
           recommendationType: rec.recommendationType,
           recommendationStrength: rec.recommendationStrength,
           boundary,
           explanation,
-          status: "OutputReady",
+
+          status: "已生成建议",
           emergency: false,
           backfillDueAt: null,
           createdAt: t,
@@ -120,9 +179,7 @@ function bindPageEvents(r) {
     const dev = qs("#ac_deviation");
     const box = qs("#deviationBox");
     if (dev && box) {
-      dev.onchange = () => {
-        box.style.display = dev.checked ? "block" : "none";
-      };
+      dev.onchange = () => { box.style.display = dev.checked ? "block" : "none"; };
     }
 
     const btn = qs("#btnSaveAction");
@@ -130,8 +187,8 @@ function bindPageEvents(r) {
       const assetId = qs("#ac_assetId")?.value || "";
       if (!assetId) return toast("请选择标的");
 
-      const actionType = qs("#ac_type")?.value || "Other";
-      const status = qs("#ac_status")?.value || "Planned";
+      const actionType = qs("#ac_type")?.value || "其他";
+      const status = qs("#ac_status")?.value || "计划";
       const emergency = !!qs("#ac_emergency")?.checked;
       const deviation = !!qs("#ac_deviation")?.checked;
 
@@ -149,12 +206,9 @@ function bindPageEvents(r) {
       }
 
       db = store.update(d => {
-        const id = uid("ac");
         const t = nowISO();
-
-        // v1.0：紧急模式可以先不绑定 assessmentId
         d.actions.push({
-          id,
+          id: uid("ac"),
           assetId,
           positionId: null,
           assessmentId: null,
@@ -169,39 +223,43 @@ function bindPageEvents(r) {
           exitCondition: deviation ? exitCondition : ""
         });
 
-        // 紧急模式：如果填了 executedAt 且无 assessmentId，则生成 backfill 任务（以 assessment 形式）
+        // 紧急模式：48h 内补齐（这里仅插入一条草稿评估，提示补齐）
         if (emergency && executedAt) {
-          const asId = uid("as");
           const due = new Date(executedAt);
           due.setHours(due.getHours() + 48);
           d.assessments.push({
-            id: asId,
+            id: uid("as"),
             assetId,
             triggerLogId: null,
-            type: "EmergencyBackfill",
-            reBuy: true,
-            reBuySizeTier: "NA",
-            riskDensity: "Med",
-            capitalConstraint: "Limited",
-            keyLevelState: "Neutral",
-            emotionRisk: "Med",
+            type: "紧急补齐",
+            reBuy: "是",
+            reBuyTier: "不适用",
+            noRebuyReason: "",
+            riskDensity: "中",
+            keyLevelState: "中性",
+            contrarian: "否",
+            capitalConstraint: "有限",
+            cashCushionOk: "是",
+            strategyFit: "仓位再平衡",
+            conflict: "不冲突",
+            emotionRisk: "中",
+            nextDecisionDamage: "中",
             outcomeTier: "C",
-            recommendationType: "WaitWithConditions",
-            recommendationStrength: "MustAssessBeforeAddingExposure",
+            recommendationType: "设条件等待",
+            recommendationStrength: "必须评估后才能增加暴露",
             boundary: "",
-            explanation: "紧急模式：需要在48小时内补齐评估输入与证据。",
-            status: "Draft",
+            explanation: "紧急模式：需在 48 小时内补齐评估与证据。",
+            status: "草稿",
             emergency: true,
             backfillDueAt: due.toISOString(),
             createdAt: t,
             updatedAt: t
           });
-          // 仍不强制绑定 action.assessmentId（因为可能要补写后再绑定），v1.0 简化为提示即可
         }
       });
 
       toast("动作已保存");
-      location.hash = `#/asset/${encodeURIComponent(assetId)}`;
+      location.hash = "#/dashboard";
     };
   }
 
@@ -225,60 +283,100 @@ function bindPageEvents(r) {
 
     const btnReset = qs("#btnReset");
     if (btnReset) btnReset.onclick = () => {
-      const ok = confirm("确定清空所有数据？此操作不可撤销。建议先导出备份。");
+      const ok = confirm("确定清空所有数据？建议先导出备份。");
       if (!ok) return;
       store.reset();
       ensureInit();
       render();
-      toast("已清空并重置");
+      toast("已清空");
+    };
+
+    const btnLang = qs("#btnToggleLang");
+    if (btnLang) btnLang.onclick = () => {
+      db = store.update(d => {
+        d.meta.lang = (d.meta.lang || "zh") === "zh" ? "en" : "zh";
+      });
+      render();
     };
   }
 }
 
-function parseMaybeDT(s) {
-  // 支持 "YYYY-MM-DD HH:mm"
-  const t = (s || "").trim();
-  if (!t) return null;
-  const m = t.match(/^(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2})$/);
-  if (!m) return null;
-  const [_, Y, M, D, hh, mm] = m;
-  const d = new Date(Number(Y), Number(M) - 1, Number(D), Number(hh), Number(mm), 0);
-  return d.toISOString();
+function readCheckboxList(idPrefix, options) {
+  const vals = [];
+  (options || []).forEach((opt, i) => {
+    const id = `${idPrefix}_${i}`;
+    const el = document.getElementById(id);
+    if (el && el.checked) vals.push(opt);
+  });
+  return vals;
 }
 
 function computeRecommendation(input) {
-  // v1.0：分档映射（可继续细化为规则表）
-  const { reBuy, riskDensity, capitalConstraint, keyLevelState, emotionRisk } = input;
+  // v1.0：规则冻结为“分档映射”[^]
+  // 这里采用一个可解释的打分 → 映射到 A/B/C/D，并输出类型/强度。
+  const {
+    reBuy,
+    reBuyTier,
+    riskDensity,
+    keyLevelState,
+    capitalConstraint,
+    cashCushionOk,
+    conflict,
+    emotionRisk,
+    nextDecisionDamage,
+    contrarian
+  } = input;
 
-  // 简单评分 -> 分档（内部，不对外暴露0-100）
   let score = 0;
-  score += reBuy ? 2 : 0;
-  score += (riskDensity === "Low" ? 2 : riskDensity === "Med" ? 1 : 0);
-  score += (capitalConstraint === "Sufficient" ? 2 : capitalConstraint === "Limited" ? 1 : 0);
-  score += (emotionRisk === "Low" ? 2 : emotionRisk === "Med" ? 1 : 0);
-  score += (keyLevelState === "Breakout" ? 2 : keyLevelState === "Retest" ? 1 : 0);
+
+  // 空仓复购意愿（核心）
+  score += (reBuy === "是") ? 3 : 0;
+  score += (reBuyTier === "75–100%") ? 2 : 0;
+  score += (reBuyTier === "50–75%") ? 1 : 0;
+
+  // 风险密度：越低越好
+  score += (riskDensity === "低") ? 2 : (riskDensity === "中" ? 1 : 0);
+
+  // 关键位：突破/回踩优于跌破
+  score += (keyLevelState === "突破前高") ? 2 : 0;
+  score += (keyLevelState === "回踩确认") ? 1 : 0;
+  score += (keyLevelState === "跌破关键位") ? -1 : 0;
+
+  // 资金约束
+  score += (capitalConstraint === "充足") ? 2 : (capitalConstraint === "有限" ? 1 : 0);
+  score += (cashCushionOk === "是") ? 1 : -1;
+
+  // 策略一致性
+  score += (conflict === "不冲突") ? 2 : (conflict === "轻微" ? 1 : 0);
+
+  // 情绪与执行风险：越低越好
+  score += (emotionRisk === "低") ? 2 : (emotionRisk === "中" ? 1 : 0);
+  score += (nextDecisionDamage === "低") ? 1 : (nextDecisionDamage === "高" ? -1 : 0);
+
+  // 逆势额外惩罚
+  score += (contrarian === "是") ? -1 : 0;
 
   let outcomeTier = "C";
-  if (score >= 9) outcomeTier = "A";
-  else if (score >= 7) outcomeTier = "B";
-  else if (score >= 5) outcomeTier = "C";
+  if (score >= 12) outcomeTier = "A";
+  else if (score >= 9) outcomeTier = "B";
+  else if (score >= 6) outcomeTier = "C";
   else outcomeTier = "D";
 
-  let recommendationType = "WaitWithConditions";
-  let recommendationStrength = "Suggest";
+  let recommendationType = "设条件等待";
+  let recommendationStrength = "建议";
 
   if (outcomeTier === "A") {
-    recommendationType = "Hold";
-    recommendationStrength = "Suggest";
+    recommendationType = "保持";
+    recommendationStrength = "建议";
   } else if (outcomeTier === "B") {
-    recommendationType = "WaitWithConditions";
-    recommendationStrength = "Suggest";
+    recommendationType = "设条件等待";
+    recommendationStrength = "建议";
   } else if (outcomeTier === "C") {
-    recommendationType = "ReduceExposure";
-    recommendationStrength = "StrongSuggest";
+    recommendationType = "减暴露";
+    recommendationStrength = "强建议";
   } else {
-    recommendationType = "ProtectiveHedge";
-    recommendationStrength = "MustAssessBeforeAddingExposure";
+    recommendationType = "保护性对冲";
+    recommendationStrength = "必须评估后才能增加暴露";
   }
 
   return { outcomeTier, recommendationType, recommendationStrength };
