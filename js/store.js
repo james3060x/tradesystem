@@ -1,81 +1,134 @@
-import { STORAGE_KEY, SCHEMA_VERSION, defaultDB, validateDBShape } from "./schema.js";
+// js/store.js
+// TradeSystem Web - LocalStorage Store
+
+import { STORAGE_KEY, normalizeDb, migrateDb, validateDb, createEmptyDb } from "./schema.js";
 import { nowISO, toast } from "./utils.js";
 
-export const store = {
-  load() {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return defaultDB();
-    try {
-      const db = JSON.parse(raw);
-      const v = validateDBShape(db);
-      if (!v.ok) {
-        toast(`导入数据异常：${v.error}，已重置为空库`);
-        return defaultDB();
-      }
-      return migrate(db);
-    } catch (e) {
-      toast("数据损坏，已重置为空库");
-      return defaultDB();
-    }
-  },
-
-  save(db) {
-    db.meta.updatedAt = nowISO();
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(db));
-  },
-
-  update(mutator) {
-    const db = this.load();
-    const next = structuredClone(db);
-    mutator(next);
-    next.meta.updatedAt = nowISO();
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
-    } catch (e) {
-      toast("保存失败：LocalStorage 空间不足（建议导出备份并清理）");
-      throw e;
-    }
-    return next;
-  },
-
-  reset() {
-    localStorage.removeItem(STORAGE_KEY);
-    return defaultDB();
-  },
-
-  exportFile() {
-    const db = this.load();
-    const blob = new Blob([JSON.stringify(db, null, 2)], { type: "application/json" });
-    const ts = new Date();
-    const pad = (n)=>String(n).padStart(2,"0");
-    const name = `TradeSystem_backup_${ts.getFullYear()}${pad(ts.getMonth()+1)}${pad(ts.getDate())}_${pad(ts.getHours())}${pad(ts.getMinutes())}.json`;
-
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = name;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    toast("已导出备份");
-  },
-
-  async importFile(file) {
-    const text = await file.text();
-    const obj = JSON.parse(text);
-    const v = validateDBShape(obj);
-    if (!v.ok) throw new Error(v.error);
-    const migrated = migrate(obj);
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(migrated));
-    toast("已导入并覆盖当前数据");
-    return migrated;
-  }
-};
-
-function migrate(db) {
-  // v1.0.0：目前只做版本对齐位（未来可扩展）
-  db.meta = db.meta || {};
-  db.meta.version = db.meta.version || SCHEMA_VERSION;
-  if (!db.meta.createdAt) db.meta.createdAt = nowISO();
-  if (!db.meta.updatedAt) db.meta.updatedAt = nowISO();
-  return db;
+function safeParse(str) {
+	try { return JSON.parse(str); } catch { return null; }
 }
+
+function clone(obj) {
+	return JSON.parse(JSON.stringify(obj));
+}
+
+function touchMeta(db) {
+	if (!db.meta) db.meta = {};
+	if (!db.meta.createdAt) db.meta.createdAt = nowISO();
+	db.meta.updatedAt = nowISO();
+}
+
+function downloadJson(filename, obj) {
+	const blob = new Blob([JSON.stringify(obj, null, 2)], { type: "application/json" });
+	const url = URL.createObjectURL(blob);
+	const a = document.createElement("a");
+	a.href = url;
+	a.download = filename;
+	document.body.appendChild(a);
+	a.click();
+	a.remove();
+	URL.revokeObjectURL(url);
+}
+
+export const store = {
+	load() {
+		let raw = null;
+		try { raw = localStorage.getItem(STORAGE_KEY); } catch { raw = null; }
+
+		if (!raw) {
+			const fresh = createEmptyDb(new Date());
+			localStorage.setItem(STORAGE_KEY, JSON.stringify(fresh));
+			return fresh;
+		}
+
+		const parsed = safeParse(raw);
+		let db = normalizeDb(parsed, new Date());
+		db = migrateDb(db);
+
+		const res = validateDb(db);
+		if (!res.ok) {
+			console.warn("DB validate failed, reset to empty DB", res.errors);
+			toast("本地数据损坏，已重置为空数据库", 2500);
+
+			const fresh = createEmptyDb(new Date());
+			localStorage.setItem(STORAGE_KEY, JSON.stringify(fresh));
+			return fresh;
+		}
+
+		return db;
+	},
+
+	save(db) {
+		const res = validateDb(db);
+		if (!res.ok) {
+			console.warn("Refuse to save invalid DB", res.errors);
+			throw new Error("Refuse to save invalid DB");
+		}
+		localStorage.setItem(STORAGE_KEY, JSON.stringify(db));
+		return db;
+	},
+
+	update(fn) {
+		const current = this.load();
+		const draft = clone(current);
+
+		fn?.(draft);
+		touchMeta(draft);
+
+		const res = validateDb(draft);
+		if (!res.ok) {
+			console.warn("Update rejected by schema validation", res.errors);
+			toast("保存失败：数据不符合 schema", 2200);
+			const err = new Error("Schema validation failed");
+			err.errors = res.errors;
+			throw err;
+		}
+
+		try {
+			this.save(draft);
+			return draft;
+		} catch (e) {
+			console.warn("Save failed", e);
+			toast("保存失败：LocalStorage 可能已满", 2200);
+			throw e;
+		}
+	},
+
+	exportBackup() {
+		const db = this.load();
+		const d = new Date();
+		const pad = (n) => String(n).padStart(2, "0");
+		const name = `TradeSystem_backup_${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}.json`;
+		downloadJson(name, db);
+		toast("已导出备份", 1600);
+	},
+
+	importBackup(rawObj) {
+		let db = normalizeDb(rawObj, new Date());
+		db = migrateDb(db);
+
+		if (!db.meta) db.meta = {};
+		if (!db.meta.createdAt) db.meta.createdAt = nowISO();
+		db.meta.updatedAt = nowISO();
+
+		const res = validateDb(db);
+		if (!res.ok) {
+			console.warn("Import rejected", res.errors);
+			toast("导入失败：备份文件结构不合法", 2200);
+			const err = new Error("Import validation failed");
+			err.errors = res.errors;
+			throw err;
+		}
+
+		this.save(db);
+		toast("导入成功（已覆盖本地数据）", 2000);
+		return db;
+	},
+
+	reset() {
+		const fresh = createEmptyDb(new Date());
+		this.save(fresh);
+		toast("已重置为空数据库", 1800);
+		return fresh;
+	},
+};
